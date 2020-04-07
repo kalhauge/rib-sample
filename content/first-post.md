@@ -1,5 +1,6 @@
 ---
 title: Hello World
+draft: false
 ---
 
 Welcome to your [`Rib`](https://rib.srid.ca) generated site.

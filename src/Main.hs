@@ -1,9 +1,11 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 
@@ -12,6 +14,7 @@ module Main where
 import Clay ((?), Css, em, pc, px, sym)
 import qualified Clay as C
 import Control.Monad
+import Data.Maybe (catMaybes)
 import Data.Aeson (FromJSON, fromJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.Text as T
@@ -20,6 +23,7 @@ import Development.Shake
 import GHC.Generics (Generic)
 import Lucid
 import Main.Utf8
+import Options.Applicative
 import Path
 import Rib (IsRoute, Pandoc)
 import qualified Rib
@@ -55,27 +59,53 @@ instance IsRoute Route where
 -- provided by Rib to do the actual generation of your static site.
 main :: IO ()
 main = withUtf8 $ do
-  Rib.run [reldir|content|] [reldir|dest|] generateSite
+  Rib.runConfig [reldir|content|] [reldir|dest|] parseConfig generateSite
+
+parseConfig :: Parser Config
+parseConfig = do
+  doPublish <- switch $
+    long "publish"
+    <> hidden
+    <> help "Publish the webpage (ei. ignore dafts)"
+
+  baseUrl <- option (maybeReader parseAbsDir) $
+    long "base-url"
+    <> help "Set the base url of the server"
+    <> value [absdir|/|]
+    <> showDefault
+    <> hidden
+    <> metavar "BASEURL"
+
+  pure $ Config {..}
+
+
+data Config = Config
+  { doPublish :: Bool,
+    baseUrl :: Path Abs Dir
+  }
 
 -- | Shake action for generating the static site
-generateSite :: Action ()
-generateSite = do
+generateSite :: Config -> Action ()
+generateSite cfg@Config {..} = do
   -- Copy over the static files
   Rib.buildStaticFiles [[relfile|static/**|]]
   let writeHtmlRoute :: Route a -> a -> Action ()
-      writeHtmlRoute r = Rib.writeRoute r . Lucid.renderText . renderPage r
+      writeHtmlRoute r = Rib.writeRoute r . Lucid.renderText . renderPage cfg r
   -- Build individual sources, generating .html for each.
   articles <-
     Rib.forEvery [[relfile|*.md|]] $ \srcPath -> do
       let r = Route_Article srcPath
       doc <- Pandoc.parse Pandoc.readMarkdown srcPath
-      writeHtmlRoute r doc
-      pure (r, doc)
-  writeHtmlRoute Route_Index articles
+      if draft (getMeta doc) && doPublish
+      then pure Nothing
+      else do
+        writeHtmlRoute r doc
+        pure $ Just (r, doc)
+  writeHtmlRoute Route_Index (catMaybes articles)
 
 -- | Define your site HTML here
-renderPage :: Route a -> a -> Html ()
-renderPage route val = html_ [lang_ "en"] $ do
+renderPage :: Config -> Route a -> a -> Html ()
+renderPage Config {..} route val = html_ [lang_ "en"] $ do
   head_ $ do
     meta_ [httpEquiv_ "Content-Type", content_ "text/html; charset=utf-8"]
     title_ routeTitle
@@ -89,7 +119,7 @@ renderPage route val = html_ [lang_ "en"] $ do
         div_ $ forM_ val $ \(r, src) ->
           li_ [class_ "pages"] $ do
             let meta = getMeta src
-            b_ $ a_ [href_ (Rib.routeUrl r)] $ toHtml $ title meta
+            b_ $ a_ [href_ (T.pack (toFilePath baseUrl) <> Rib.routeUrlRel r)] $ toHtml $ title meta
             renderMarkdown `mapM_` description meta
       Route_Article _ ->
         article_ $
@@ -120,7 +150,8 @@ data SrcMeta
   = SrcMeta
       { title :: Text,
         -- | Description is optional, hence `Maybe`
-        description :: Maybe Text
+        description :: Maybe Text,
+        draft :: Bool
       }
   deriving (Show, Eq, Generic, FromJSON)
 
