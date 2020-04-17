@@ -23,4 +23,7 @@ executable rib-sample
         rib ^>=0.9,
         shake,
         text,
+        path,
+        transformers,
+        mtl,
         with-utf8
